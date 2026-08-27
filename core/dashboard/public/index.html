@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CrowdShield — 2G Tactical Command Console</title>
+  
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+
+  <style>
+    :root {
+      --bg: #05080e;
+      --card: #0b111e;
+      --border: #1e293b;
+      --accent: #38bdf8;
+      --crit: #ff3b5c;
+      --warn: #f59e0b;
+      --safe: #10b981;
+      --text: #f8fafc;
+      --mono: 'JetBrains Mono', monospace;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: var(--bg); color: var(--text); font-family: -apple-system, BlinkMacSystemFont, sans-serif; display: flex; height: 100vh; overflow: hidden; }
+
+    .sidebar { width: 360px; background: #070c16; border-right: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto; }
+    .ussd-screen { background: #020617; border: 1px solid var(--border); padding: 12px; border-radius: 6px; font-family: var(--mono); font-size: 0.82rem; color: #38bdf8; min-height: 100px; white-space: pre-line; }
+    .keypad { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
+    .btn-key { background: #1e293b; border: 1px solid var(--border); color: #fff; padding: 8px; border-radius: 6px; font-weight: bold; cursor: pointer; }
+    .btn-key:hover { background: var(--accent); color: #000; }
+
+    .main { flex: 1; display: flex; flex-direction: column; }
+    .topbar { height: 50px; background: var(--card); border-bottom: 1px solid var(--border); display: flex; align-items: center; justify-content: space-between; padding: 0 20px; font-family: var(--mono); }
+    .grid-view { flex: 1; display: grid; grid-template-columns: 1fr 380px; }
+    #map { height: 100%; width: 100%; background: #020408; }
+    .queue-panel { background: #070c16; border-left: 1px solid var(--border); display: flex; flex-direction: column; }
+    
+    .badge { padding: 3px 8px; border-radius: 4px; font-size: 0.72rem; font-family: var(--mono); font-weight: bold; }
+    .badge-crit { background: rgba(255, 59, 92, 0.2); color: var(--crit); border: 1px solid var(--crit); }
+    .badge-safe { background: rgba(16, 185, 129, 0.2); color: var(--safe); border: 1px solid var(--safe); }
+    .cluster-card { padding: 12px; border-bottom: 1px solid var(--border); cursor: pointer; transition: 0.2s; }
+    .cluster-card:hover { background: #0f172a; }
+  </style>
+</head>
+<body>
+
+  <div class="sidebar">
+    <div style="display:flex; justify-content:space-between; align-items:center;">
+      <h3 style="font-family:var(--mono); color:var(--accent); font-size:0.95rem;">📱 USSD *112# GATEWAY</h3>
+      <span class="badge badge-safe">SDCCH/8</span>
+    </div>
+
+    <div class="ussd-screen" id="ussdScreen">DIAL *112# FOR DISASTER SOS</div>
+    <div class="keypad">
+      <button class="btn-key" onclick="press('1')">1</button>
+      <button class="btn-key" onclick="press('2')">2</button>
+      <button class="btn-key" onclick="press('3')">3</button>
+      <button class="btn-key" onclick="press('4')">4</button>
+      <button class="btn-key" onclick="press('5')">5</button>
+      <button class="btn-key" onclick="press('6')">6</button>
+      <button class="btn-key" onclick="press('*')">*</button>
+      <button class="btn-key" onclick="press('0')">0</button>
+      <button class="btn-key" onclick="press('#')">#</button>
+    </div>
+    <button class="btn-key" onclick="sendUSSD()" style="background:var(--safe); color:#000;">📞 TRANSMIT (37-BYTE STRUCT)</button>
+
+    <div style="background:var(--card); padding:10px; border-radius:6px; border:1px solid var(--border);">
+      <div style="font-size:0.75rem; color:#94a3b8; font-family:var(--mono);">37B BINARY SERIALIZATION[cite: 1]:</div>
+      <div id="hexDump" style="font-family:var(--mono); font-size:0.68rem; color:#fbbf24; word-break:break-all; margin-top:4px;">AWAITING BURST...</div>
+    </div>
+    
+    <div style="background:var(--card); padding:10px; border-radius:6px; border:1px solid var(--border);">
+      <div style="display:flex; justify-content:space-between; font-family:var(--mono); font-size:0.75rem;">
+        <span>SDCCH Channel Load</span>
+        <span id="sdcchLoadText" style="color:var(--accent);">1/8 Active</span>
+      </div>
+    </div>
+  </div>
+
+  <div class="main">
+    <div class="topbar">
+      <div>⚡ NDRF TACTICAL RESCUE HUB — SILCHAR SECTOR[cite: 1]</div>
+      <span id="netStatus" class="badge badge-safe">MESH CONNECTED</span>
+    </div>
+
+    <div class="grid-view">
+      <div id="map"></div>
+      <div class="queue-panel">
+        <div style="padding:12px; background:#0b111e; border-bottom:1px solid var(--border); font-family:var(--mono); font-size:0.85rem; color:var(--accent);">
+          🚨 100M CLUSTERED RESCUE QUEUE
+        </div>
+        <div id="queueList" style="flex:1; overflow-y:auto;"></div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const map = L.map('map', { zoomControl: false }).setView([24.825, 92.795], 13);
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png').addTo(map);
+
+    // Sentinel-1 SAR Overlay[cite: 1]
+    L.polygon([
+      [24.815, 92.775], [24.830, 92.810], [24.845, 92.805], [24.835, 92.770]
+    ], { color: '#38bdf8', fillColor: '#0284c7', fillOpacity: 0.35, weight: 1 }).addTo(map).bindPopup("Sentinel-1 SAR Inundation Mask[cite: 1]");
+
+    const ws = new WebSocket('ws://localhost:8000/ws');
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'NEW_TRIAGE_CLUSTER') {
+        renderTriageItem(msg.cluster, msg.raw_hex, msg.sdcch_load);
+      }
+    };
+
+    function renderTriageItem(c, hex, load) {
+      document.getElementById('hexDump').textContent = hex;
+      document.getElementById('sdcchLoadText').textContent = `${load} Active`;
+
+      const marker = L.circleMarker([c.lat, c.lon], {
+        radius: 9, fillColor: c.severity === 3 ? '#ff3b5c' : '#f59e0b', color: '#fff', weight: 2, fillOpacity: 0.9
+      }).addTo(map);
+      marker.bindPopup(`<b>${c.cell_id}</b><br>Score: ${c.triage_score}<br>Headcount: ${c.headcount}`).openPopup();
+
+      const q = document.getElementById('queueList');
+      const card = document.createElement('div');
+      card.className = 'cluster-card';
+      card.innerHTML = `
+        <div style="display:flex; justify-content:space-between;">
+          <b style="color:#fff;">📍 ${c.cell_id}</b>
+          <span class="badge ${c.severity === 3 ? 'badge-crit' : 'badge-safe'}">SCORE ${c.triage_score}</span>
+        </div>
+        <div style="font-size:0.78rem; color:#94a3b8; margin-top:4px;">
+          Headcount: <b style="color:#fff;">${c.headcount}</b> | Need: <b style="color:var(--accent);">${c.category === 1 ? 'Boat' : 'Medical'}[cite: 1]</b>
+        </div>
+      `;
+      q.prepend(card);
+    }
+
+    let step = 0, inputBuf = "", sos = { count: 2, severity: 3, need: 1 };
+    const scr = document.getElementById('ussdScreen');
+
+    function press(k) { inputBuf += k; scr.textContent += k; }
+    function sendUSSD() {
+      if (step === 0) {
+        step = 1; inputBuf = "";
+        scr.textContent = "EMERGENCY SOS MENU\n1. 1-3 Stranded\n2. 4-8 Stranded\n3. 9+ Stranded[cite: 1]";
+      } else if (step === 1) {
+        sos.count = inputBuf === "1" ? 2 : (inputBuf === "2" ? 6 : 12);
+        step = 2; inputBuf = "";
+        scr.textContent = "CONDITION:\n1. Roof / Drowning (Crit)\n2. Water Rising (High)\n3. Safe Ground[cite: 1]";
+      } else if (step === 2) {
+        sos.severity = inputBuf === "1" ? 3 : (inputBuf === "2" ? 2 : 1);
+        step = 3; inputBuf = "";
+        scr.textContent = "AID REQUIRED:\n1. Rescue Boat\n2. Medical First Aid\n3. Food / Water[cite: 1]";
+      } else if (step === 3) {
+        sos.need = parseInt(inputBuf) || 1;
+        scr.textContent = "TRANSMITTING 37-BYTE PAYLOAD VIA SDCCH...[cite: 1]";
+        
+        fetch('http://localhost:8000/api/send-sos', {
+          method: 'POST',
+          headers: {'Content-Type': 'application/json'},
+          body: JSON.stringify({
+            lat: 24.825 + (Math.random() * 0.015),
+            lon: 92.790 + (Math.random() * 0.02),
+            severity: sos.severity, need: sos.need, count: sos.count,
+            seq: 1, imei: Math.floor(100000 + Math.random() * 900000), landmark: "SILCHAR_S1"
+          })
+        }).then(r => r.json()).then(() => {
+          scr.textContent = "✅ ACK RECEIVED FROM HUB\nStatus: RESCUE QUEUED\nETA: 14 mins";
+          step = 0; inputBuf = "";
+        });
+      }
+    }
+  </script>
+</body>
+</html>
